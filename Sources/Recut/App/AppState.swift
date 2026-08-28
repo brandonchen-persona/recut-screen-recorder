@@ -13,7 +13,10 @@ final class AppState: ObservableObject {
     @Published var project: Project?
     @Published var edit = EditModel() { didSet { editChanged(previous: oldValue) } }
     @Published var selection: UUID? {
-        didSet { if selection != nil { selectedMask = nil } }
+        didSet {
+            guard selection != oldValue else { return }
+            if selection != nil { selectedMask = nil }
+        }
     }
     @Published var errorMessage: String?
     @Published var busyMessage: String?
@@ -27,6 +30,11 @@ final class AppState: ObservableObject {
     @Published var isCropping = false { didSet { previewModeChanged() } }
     @Published var selectedMask: UUID? {
         didSet {
+            // `didSet` also fires when the value is assigned unchanged, and a
+            // drag re-selects the block it is already on for every event. Left
+            // ungated that paused the player and recomposited the preview sixty
+            // times a second, which is what made trimming judder.
+            guard selectedMask != oldValue else { return }
             // One overlay at a time — the mask overlay unzooms the preview, so
             // leaving it up while a zoom is selected would show the zoom's
             // anchor against a frame the zoom isn't applied to.
@@ -39,7 +47,10 @@ final class AppState: ObservableObject {
         }
     }
     @Published var selectedText: UUID? {
-        didSet { if selectedText != nil { selectedMask = nil } }
+        didSet {
+            guard selectedText != oldValue else { return }
+            if selectedText != nil { selectedMask = nil }
+        }
     }
     /// True while the purple anchor dot for a manual zoom is on the preview.
     @Published var placingAnchor = false { didSet { previewModeChanged() } }

@@ -22,6 +22,15 @@ struct TimelineView: View {
     var waveform: Waveform?
 
     @State private var zoomLevel: Double = 1
+    /// Which clip is being trimmed, where its edges were when the drag began,
+    /// and the scale it was drawn at.
+    ///
+    /// The lanes always fit the whole timeline to the available width, so
+    /// trimming a clip changes seconds-per-point *while you are dragging*.
+    /// Reading the live scale each event made the edge accelerate away from the
+    /// pointer — a 62pt pull moved the edge 0.93s instead of 1.00s, and letting
+    /// go somewhere the handle no longer was.
+    @State private var trimState: (clip: UUID, span: DragSpan, scale: CGFloat)?
 
     private let rulerHeight: CGFloat = 26
     private let headWidth: CGFloat = 18
@@ -197,25 +206,35 @@ struct TimelineView: View {
                 .allowsHitTesting(false)
             }
 
-            // Trim handles on the outer edges of the timeline.
+            // Trim handles on the outer edges of the timeline. Both work from
+            // the clip's edges as they were when the drag began, so the handle
+            // tracks the pointer instead of accumulating per-event deltas.
             HStack(spacing: 0) {
-                TrimHandle(height: clipHeight) { dx in
-                    guard scale > 0, let i = clipIndex(entry.clipID) else { return }
-                    let delta = Double(dx / scale) * entry.speed
-                    edit.clips[i].sourceStart = min(
-                        max(0, edit.clips[i].sourceStart + delta),
-                        edit.clips[i].sourceEnd - 0.15
-                    )
-                }
+                TrimHandle(
+                    height: clipHeight,
+                    onDrag: { dx in
+                        guard let i = clipIndex(entry.clipID),
+                              let base = trimBase(for: entry.clipID, scale: scale),
+                              base.scale > 0 else { return }
+                        let delta = Double(dx / base.scale) * entry.speed
+                        edit.clips[i].sourceStart = min(max(0, base.span.start + delta),
+                                                        base.span.end - 0.15)
+                    },
+                    onEnd: { trimState = nil }
+                )
                 Spacer(minLength: 0)
-                TrimHandle(height: clipHeight) { dx in
-                    guard scale > 0, let i = clipIndex(entry.clipID) else { return }
-                    let delta = Double(dx / scale) * entry.speed
-                    edit.clips[i].sourceEnd = max(
-                        edit.clips[i].sourceStart + 0.15,
-                        edit.clips[i].sourceEnd + delta
-                    )
-                }
+                TrimHandle(
+                    height: clipHeight,
+                    onDrag: { dx in
+                        guard let i = clipIndex(entry.clipID),
+                              let base = trimBase(for: entry.clipID, scale: scale),
+                              base.scale > 0 else { return }
+                        let delta = Double(dx / base.scale) * entry.speed
+                        edit.clips[i].sourceEnd = max(base.span.start + 0.15,
+                                                      base.span.end + delta)
+                    },
+                    onEnd: { trimState = nil }
+                )
             }
         }
         .frame(width: w, height: clipHeight)
@@ -388,6 +407,20 @@ struct TimelineView: View {
         selectedText = overlay.id
     }
 
+    /// The values a trim is measured from, captured on the drag's first event
+    /// and held until it ends.
+    private func trimBase(
+        for clipID: UUID, scale: CGFloat
+    ) -> (span: DragSpan, scale: CGFloat)? {
+        if let trimState, trimState.clip == clipID {
+            return (trimState.span, trimState.scale)
+        }
+        guard let i = clipIndex(clipID) else { return nil }
+        let span = DragSpan(start: edit.clips[i].sourceStart, end: edit.clips[i].sourceEnd)
+        trimState = (clipID, span, scale)
+        return (span, scale)
+    }
+
     private func addMask(atOutput t: Double, timeline: Timeline) {
         let (start, end) = MaskRegion.defaultSpan(
             atOutput: t, timeline: timeline, bounds: edit.sourceRange
@@ -492,9 +525,15 @@ struct TimelineView: View {
 
 private struct TrimHandle: View {
     let height: CGFloat
+    /// Called with the drag's *total* offset from where it started.
+    ///
+    /// Deliberately carries no "has it begun" state of its own. Trimming
+    /// rebuilds the clip rows underneath, which resets `@State` inside them —
+    /// a begin callback fired from here re-based the drag part-way through and
+    /// the edge shot off at roughly two and a half times the pointer. The
+    /// caller keeps the starting values instead, in state that survives.
     let onDrag: (CGFloat) -> Void
-
-    @State private var lastX: CGFloat?
+    let onEnd: () -> Void
 
     var body: some View {
         RoundedRectangle(cornerRadius: 3)
@@ -506,14 +545,13 @@ private struct TrimHandle: View {
                     .frame(width: 2, height: height * 0.4)
             )
             .contentShape(Rectangle().inset(by: -5))
+            // Global space: this handle is inside a block whose width and
+            // offset change as it is dragged, so a reading taken in the
+            // handle's own space moves with the handle and fights the pointer.
             .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let previous = lastX ?? value.startLocation.x
-                        onDrag(value.location.x - previous)
-                        lastX = value.location.x
-                    }
-                    .onEnded { _ in lastX = nil }
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { onDrag($0.translation.width) }
+                    .onEnded { _ in onEnd() }
             )
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
@@ -546,6 +584,17 @@ private struct SpanGrip: View {
     }
 }
 
+/// The start and end a span drag is measured from.
+///
+/// Captured once when the gesture begins. Applying the gesture's *cumulative*
+/// translation to a fixed base is what keeps an edge under the pointer: adding
+/// per-event deltas to the live value compounds rounding, and any re-render
+/// that clears the stored previous position turns into a visible jump.
+private struct DragSpan {
+    var start: Double
+    var end: Double
+}
+
 // MARK: - Zoom segment block
 
 private struct SegmentBlock: View {
@@ -559,7 +608,9 @@ private struct SegmentBlock: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
 
-    @State private var lastX: CGFloat?
+    @State private var dragBase: DragSpan?
+
+    private let minDuration = 0.3
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -594,14 +645,15 @@ private struct SegmentBlock: View {
         .frame(width: w, height: height)
         .offset(x: x)
         .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    onSelect()
-                    let previous = lastX ?? value.startLocation.x
-                    move(by: Double(value.location.x - previous) * secondsPerPoint)
-                    lastX = value.location.x
+                    let base = begin()
+                    let delta = Double(value.translation.width) * secondsPerPoint
+                    let duration = base.end - base.start
+                    segment.start = max(0, base.start + delta)
+                    segment.end = segment.start + duration
                 }
-                .onEnded { _ in lastX = nil; segment.isManual = true }
+                .onEnded { _ in dragBase = nil; segment.isManual = true }
         )
         .contextMenu {
             Button(segment.isEnabled ? "Disable" : "Enable") {
@@ -616,33 +668,32 @@ private struct SegmentBlock: View {
         SpanGrip(height: height, isSelected: isSelected, isVisible: w > 26)
             .contentShape(Rectangle().inset(by: -4))
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        onSelect()
-                        let previous = lastX ?? value.startLocation.x
-                        resize(by: Double(value.location.x - previous) * secondsPerPoint,
-                               leading: isLeading)
-                        lastX = value.location.x
+                        let base = begin()
+                        let delta = Double(value.translation.width) * secondsPerPoint
+                        if isLeading {
+                            segment.start = min(max(0, base.start + delta),
+                                                base.end - minDuration)
+                        } else {
+                            segment.end = max(base.start + minDuration, base.end + delta)
+                        }
                     }
-                    .onEnded { _ in lastX = nil; segment.isManual = true }
+                    .onEnded { _ in dragBase = nil; segment.isManual = true }
             )
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
     }
 
-    private func move(by delta: Double) {
-        let d = segment.duration
-        segment.start = max(0, segment.start + delta)
-        segment.end = segment.start + d
-    }
-
-    private func resize(by delta: Double, leading: Bool) {
-        if leading {
-            segment.start = min(max(0, segment.start + delta), segment.end - 0.3)
-        } else {
-            segment.end = max(segment.start + 0.3, segment.end + delta)
-        }
+    /// Records where the segment was when the drag started, and selects it once
+    /// rather than on every event.
+    private func begin() -> DragSpan {
+        if let dragBase { return dragBase }
+        onSelect()
+        let base = DragSpan(start: segment.start, end: segment.end)
+        dragBase = base
+        return base
     }
 }
 
@@ -658,7 +709,9 @@ private struct MaskBlock: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
 
-    @State private var lastX: CGFloat?
+    @State private var dragBase: DragSpan?
+
+    private let minDuration = 0.2
 
     private var tint: Color {
         mask.kind == .highlight ? .yellow : .teal
@@ -693,17 +746,15 @@ private struct MaskBlock: View {
         .frame(width: w, height: height)
         .offset(x: x)
         .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    onSelect()
-                    let previous = lastX ?? value.startLocation.x
-                    let delta = Double(value.location.x - previous) * secondsPerPoint
-                    let d = mask.end - mask.start
-                    mask.start = max(0, mask.start + delta)
-                    mask.end = mask.start + d
-                    lastX = value.location.x
+                    let base = begin()
+                    let delta = Double(value.translation.width) * secondsPerPoint
+                    let duration = base.end - base.start
+                    mask.start = max(0, base.start + delta)
+                    mask.end = mask.start + duration
                 }
-                .onEnded { _ in lastX = nil }
+                .onEnded { _ in dragBase = nil }
         )
         .contextMenu {
             Button("Remove", role: .destructive, action: onDelete)
@@ -714,23 +765,32 @@ private struct MaskBlock: View {
         SpanGrip(height: height, isSelected: isSelected, isVisible: w > 26)
             .contentShape(Rectangle().inset(by: -4))
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        onSelect()
-                        let previous = lastX ?? value.startLocation.x
-                        let delta = Double(value.location.x - previous) * secondsPerPoint
+                        let base = begin()
+                        let delta = Double(value.translation.width) * secondsPerPoint
                         if isLeading {
-                            mask.start = min(max(0, mask.start + delta), mask.end - 0.2)
+                            mask.start = min(max(0, base.start + delta),
+                                           base.end - minDuration)
                         } else {
-                            mask.end = max(mask.start + 0.2, mask.end + delta)
+                            mask.end = max(base.start + minDuration, base.end + delta)
                         }
-                        lastX = value.location.x
                     }
-                    .onEnded { _ in lastX = nil }
+                    .onEnded { _ in dragBase = nil }
             )
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
+    }
+
+    /// Captures the span the drag is measured from, and selects the block once
+    /// instead of on every event.
+    private func begin() -> DragSpan {
+        if let dragBase { return dragBase }
+        onSelect()
+        let base = DragSpan(start: mask.start, end: mask.end)
+        dragBase = base
+        return base
     }
 }
 
@@ -780,7 +840,9 @@ private struct TextBlock: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
 
-    @State private var lastX: CGFloat?
+    @State private var dragBase: DragSpan?
+
+    private let minDuration = 0.2
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -814,17 +876,15 @@ private struct TextBlock: View {
         .frame(width: w, height: height)
         .offset(x: x)
         .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                 .onChanged { value in
-                    onSelect()
-                    let previous = lastX ?? value.startLocation.x
-                    let delta = Double(value.location.x - previous) * secondsPerPoint
-                    let d = overlay.end - overlay.start
-                    overlay.start = max(0, overlay.start + delta)
-                    overlay.end = overlay.start + d
-                    lastX = value.location.x
+                    let base = begin()
+                    let delta = Double(value.translation.width) * secondsPerPoint
+                    let duration = base.end - base.start
+                    overlay.start = max(0, base.start + delta)
+                    overlay.end = overlay.start + duration
                 }
-                .onEnded { _ in lastX = nil }
+                .onEnded { _ in dragBase = nil }
         )
         .contextMenu {
             Button("Remove", role: .destructive, action: onDelete)
@@ -835,23 +895,32 @@ private struct TextBlock: View {
         SpanGrip(height: height, isSelected: isSelected, isVisible: w > 26)
             .contentShape(Rectangle().inset(by: -4))
             .gesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
-                        onSelect()
-                        let previous = lastX ?? value.startLocation.x
-                        let delta = Double(value.location.x - previous) * secondsPerPoint
+                        let base = begin()
+                        let delta = Double(value.translation.width) * secondsPerPoint
                         if isLeading {
-                            overlay.start = min(max(0, overlay.start + delta), overlay.end - 0.2)
+                            overlay.start = min(max(0, base.start + delta),
+                                           base.end - minDuration)
                         } else {
-                            overlay.end = max(overlay.start + 0.2, overlay.end + delta)
+                            overlay.end = max(base.start + minDuration, base.end + delta)
                         }
-                        lastX = value.location.x
                     }
-                    .onEnded { _ in lastX = nil }
+                    .onEnded { _ in dragBase = nil }
             )
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
+    }
+
+    /// Captures the span the drag is measured from, and selects the block once
+    /// instead of on every event.
+    private func begin() -> DragSpan {
+        if let dragBase { return dragBase }
+        onSelect()
+        let base = DragSpan(start: overlay.start, end: overlay.end)
+        dragBase = base
+        return base
     }
 }
 

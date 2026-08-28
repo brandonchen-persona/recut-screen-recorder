@@ -225,8 +225,10 @@ and reverted rather than left in place doing nothing. A `setFrame` from
 
 ### Dragging things on the preview
 
-`DragGesture` reports `translation` in the coordinate space of the view it is
-attached to. All three preview overlays move the very view carrying the gesture,
+Three separate things make a drag jitter here, and the timeline hit all three.
+
+**1. Coordinate space.** `DragGesture` reports `translation` in the space of the
+view it is attached to. All three preview overlays move the very view carrying the gesture,
 so measuring locally feeds each frame's movement into the next event's
 translation and the shape accelerates away from the pointer — a mask dragged
 100pt right and 80pt down came out nearly twice its original size in the wrong
@@ -234,6 +236,29 @@ place. **Every drag on the preview must use `coordinateSpace: .global`**, and
 anything reading `value.location` rather than a delta has to map the global
 point back through `geo.frame(in: .global).origin`. The arithmetic itself lives
 in `RectDrag` so the clamping is testable away from the view.
+
+**2. Cumulative, not incremental.** Apply the gesture's *total* translation to a
+base captured when the drag began. Adding per-event deltas to the live value
+compounds rounding, and it makes any lost event permanent.
+
+**3. Where the base lives.** `@State` inside a row of a `ForEach` is not safe to
+hold a drag base in: editing the model rebuilds the rows and resets it. A
+`TrimHandle` that tracked "have I begun" locally re-based itself part-way
+through and the clip edge ran at roughly 2.5× the pointer. Keep the base in the
+enclosing view — `TimelineView.trimState` — which survives the rebuild, and
+capture it lazily on the first event rather than in a begin callback.
+
+A fourth thing is specific to this timeline: the lanes fit the *whole* timeline
+to the available width, so trimming a clip changes seconds-per-point while the
+drag is in flight. The scale is captured with the base and held for the gesture,
+otherwise the edge accelerates away from the pointer. Zoom and mask spans don't
+change the timeline's duration, so they don't need it.
+
+Selection is the other half of the flicker. `didSet` on an `@Published` fires
+even when the value is unchanged, and a drag re-selects the block it is already
+on for every event — which was pausing the player and recompositing the preview
+sixty times a second. All three selection properties now guard on
+`!= oldValue`, and the blocks select once at the start of a drag.
 
 ### Microphones
 

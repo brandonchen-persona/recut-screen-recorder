@@ -136,7 +136,9 @@ a gradient, a solid colour, or your own image — plus padding, corner radius,
 inset border and drop shadow on the screen layer.
 
 Zooms, blurs and callouts all carry a grab bar at each end: drag the middle to
-move the effect, drag an end to change how much of the take it covers.
+move the effect, drag an end to change how much of the take it covers. Every
+handle tracks the pointer one-to-one — drag an edge out and back and it lands
+exactly where it started.
 
 **Masks & highlights.** Select one on the timeline and the preview switches to
 the unzoomed frame with the rectangle drawn on it — drag it to move, drag a
