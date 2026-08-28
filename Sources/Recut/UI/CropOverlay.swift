@@ -52,10 +52,14 @@ struct CropOverlay: View {
                 Color.white.opacity(0.001)
                     .frame(width: rect.width, height: rect.height)
                     .offset(x: rect.minX, y: rect.minY)
-                    .gesture(DragGesture()
+                    // Global space: `translation` reported in a moving view's
+                    // own space folds each frame's movement back into the next
+                    // event, so the rectangle accelerates away from the pointer.
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
                         .onChanged { value in
-                            move(by: value.translation, in: content, from: dragStart ?? crop)
-                            if dragStart == nil { dragStart = crop }
+                            let base = dragStart ?? crop
+                            dragStart = base
+                            move(by: value.translation, in: content, from: base)
                         }
                         .onEnded { _ in dragStart = nil })
 
@@ -67,11 +71,13 @@ struct CropOverlay: View {
                                 .overlay(Circle().strokeBorder(Color.black.opacity(0.35)))
                                 .frame(width: handle, height: handle)
                                 .offset(x: point.x - handle / 2, y: point.y - handle / 2)
-                                .gesture(DragGesture()
+                                .gesture(DragGesture(minimumDistance: 0,
+                                                     coordinateSpace: .global)
                                     .onChanged { value in
+                                        let base = dragStart ?? crop
+                                        dragStart = base
                                         resize(corner, by: value.translation,
-                                               in: content, from: dragStart ?? crop)
-                                        if dragStart == nil { dragStart = crop }
+                                               in: content, from: base)
                                     }
                                     .onEnded { _ in dragStart = nil })
                         }
@@ -218,12 +224,18 @@ struct AnchorOverlay: View {
                     .frame(width: 18, height: 18)
                     .shadow(radius: 3)
                     .offset(x: point.x - 9, y: point.y - 9)
-                    .gesture(DragGesture()
+                    // Same reason as the crop handles, except this one reads an
+                    // absolute position rather than a delta, so the global
+                    // point is mapped back into the overlay's own space.
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
                         .onChanged { value in
                             guard content.width > 0, content.height > 0 else { return }
+                            let origin = geo.frame(in: .global).origin
+                            let local = CGPoint(x: value.location.x - origin.x,
+                                                y: value.location.y - origin.y)
                             anchor = NPoint(
-                                min(max(0, Double((value.location.x - content.minX) / content.width)), 1),
-                                min(max(0, Double((value.location.y - content.minY) / content.height)), 1)
+                                min(max(0, Double((local.x - content.minX) / content.width)), 1),
+                                min(max(0, Double((local.y - content.minY) / content.height)), 1)
                             )
                         })
             }

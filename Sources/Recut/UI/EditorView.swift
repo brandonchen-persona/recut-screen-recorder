@@ -25,6 +25,14 @@ struct EditorView: View {
                             contentAspect: state.fullSourceAspect,
                             padding: state.edit.background.padding
                         )
+                    } else if let index = state.selectedMaskIndex {
+                        MaskOverlay(
+                            mask: $state.edit.masks[index],
+                            canvasAspect: state.canvasAspect,
+                            contentAspect: state.fullSourceAspect,
+                            padding: state.edit.background.padding,
+                            isActiveNow: state.selectedMaskIsActiveNow
+                        )
                     } else if state.placingAnchor, let index = state.selectedSegmentIndex {
                         AnchorOverlay(
                             anchor: $state.edit.segments[index].anchor,

@@ -136,7 +136,14 @@ a gradient, a solid colour, or your own image — plus padding, corner radius,
 inset border and drop shadow on the screen layer.
 
 Zooms, blurs and callouts all carry a grab bar at each end: drag the middle to
-move the effect, drag an end to change how much of the take it covers.
+move the effect, drag an end to change how much of the take it covers. Every
+handle tracks the pointer one-to-one — drag an edge out and back and it lands
+exactly where it started.
+
+**Masks & highlights.** Select one on the timeline and the preview switches to
+the unzoomed frame with the rectangle drawn on it — drag it to move, drag a
+corner to resize. Exact percentages are still there under "Exact size and
+position" for anyone who wants a number.
 
 **Text & logo.** A text lane on the timeline for callouts — "New in 2.4",
 "Click here" — as plain text, a pill or a card, with position, size, colours and
@@ -182,13 +189,20 @@ build/Recut.app/Contents/MacOS/Recut --render ~/Movies/Recut/Something.recut out
 build/Recut.app/Contents/MacOS/Recut --frames ~/Movies/Recut/Something.recut ./frames 1.5,5.0,10.4
 build/Recut.app/Contents/MacOS/Recut --typing ~/Movies/Recut/Something.recut --apply 2.0
 build/Recut.app/Contents/MacOS/Recut --waveform ~/Movies/Recut/Something.recut
+build/Recut.app/Contents/MacOS/Recut --mics            # list inputs
+build/Recut.app/Contents/MacOS/Recut --mics 0          # record 2s and check one
 ```
 
 `--render` is a batch export; the format comes from the file extension, GIF
 included. `--frames` writes single composited stills and prints the camera state
 at each time, which is the quickest way to check what the planner decided.
 `--typing` reports the typing runs it finds, and with `--apply` cuts them into
-their own sped-up clips. `--waveform` prints the audio envelope second by
+their own sped-up clips. `--mics` lists the microphones the app can see with
+their native formats; given an index it records two seconds, reports the
+delivered format, clock and level, and pushes the result through the same
+encoder settings a real take uses — which is the quickest way to tell a dead
+microphone from a mis-selected one. Add `raw` to skip Recut's own conversion
+and see what the device produces unaided. `--waveform` prints the audio envelope second by
 second, which is how you tell a silent recording from a silent *export*.
 
 ## Tests
@@ -197,7 +211,7 @@ second, which is how you tell a silent recording from a silent *export*.
 ./Scripts/test.sh
 ```
 
-83 tests over the pure engine — timeline mapping, zoom planning, the camera
+91 tests over the pure engine — timeline mapping, zoom planning, the camera
 solver, cursor smoothing, typing detection, canvas sizing, callout fades, the
 audio envelope and meter, mask defaults, undo, and project decoding.
 No AVFoundation, no Core Image, no files; the whole suite runs in well under a
