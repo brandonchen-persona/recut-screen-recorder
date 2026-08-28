@@ -140,10 +140,10 @@ Both halves are fixed and both matter:
 ./Scripts/test.sh
 ```
 
-83 tests, 323 assertions, well under a second. They cover the pure engine —
+91 tests, 399 assertions, well under a second. They cover the pure engine —
 `Timeline`, `ZoomPlanner`, `CameraSolver`, `CursorPath`, `TypingDetector`,
 canvas sizing, `History`, `TextOverlay` fades, `Waveform`, the microphone meter
-mapping, mask defaults and project decoding — and touch no AVFoundation, Core
+mapping, mask defaults, `RectDrag` and project decoding — and touch no AVFoundation, Core
 Image or files. **Run them before and after any engine change.**
 
 Two things to know:
@@ -223,6 +223,49 @@ neither `.defaultSize`, an explicit `idealWidth`/`idealHeight`, nor
 and reverted rather than left in place doing nothing. A `setFrame` from
 `AppDelegate.applicationDidFinishLaunching` would work if it becomes worth it.
 
+### Dragging things on the preview
+
+`DragGesture` reports `translation` in the coordinate space of the view it is
+attached to. All three preview overlays move the very view carrying the gesture,
+so measuring locally feeds each frame's movement into the next event's
+translation and the shape accelerates away from the pointer — a mask dragged
+100pt right and 80pt down came out nearly twice its original size in the wrong
+place. **Every drag on the preview must use `coordinateSpace: .global`**, and
+anything reading `value.location` rather than a delta has to map the global
+point back through `geo.frame(in: .global).origin`. The arithmetic itself lives
+in `RectDrag` so the clamping is testable away from the view.
+
+### Microphones
+
+`--mics` exists because none of this is visible from the outside. What the
+investigation actually established:
+
+- **The writer is not fussy.** An `AVAssetWriterInput` configured for 48 kHz
+  stereo AAC accepts 44.1 kHz, 32 kHz, 16 kHz, 96 kHz, mono, 4-, 8- and
+  18-channel input and resamples it correctly. Format mismatch was the obvious
+  suspect and it was measured and ruled out — don't spend a second afternoon on
+  it. `MicrophoneRecorder.canonicalOutputSettings` stays for predictability, not
+  because the writer needs it.
+- **Clocks are the real asymmetry.** `AVCaptureSession` stamps its output on
+  `synchronizationClock`, which is read-only and, for an external interface, is
+  that device's own clock. ScreenCaptureKit stamps video on the host clock and
+  `ScreenRecorder` opens the writer session at a *video* timestamp. Mic buffers
+  are therefore converted with `CMSyncConvertTime` in `hostTimed(_:)`, per
+  buffer so that drift is tracked rather than just the initial offset. Both
+  microphones available on this machine turned out to be host-aligned, so the
+  divergent case is reasoned from the documented behaviour rather than measured
+   — worth re-checking against a real USB interface.
+- **The rest was plumbing, and plumbing is what usually breaks**: the device
+  list only refreshed inside `refreshDisplays()` (and only with screen-recording
+  permission), so a microphone plugged in after launch never appeared; `start()`
+  returned early when the session was already running, making a device change a
+  no-op; `stop()` skipped its cleanup if `startRunning` was still queued; a
+  selection pointing at a vanished device silently recorded nothing; and
+  `try? microphone.start(...)` swallowed every failure.
+
+Validation is retried three times: the meter's own session has usually just
+released the device, and USB hardware doesn't always let go on the same breath.
+
 ## Where to take it next
 
 - **Widen the test net.** The pure engine is covered; `FrameRenderer` and
@@ -235,6 +278,8 @@ and reverted rather than left in place doing nothing. A `setFrame` from
   input meter are done; the envelope is cached in `waveform.json` per project.
 - **Cursor polish**: distinct pointer shapes (I-beam, pointing hand) rather than
   one arrow; the recorded track has the position but not the type.
+- **A real external microphone test.** The clock conversion above is correct by
+  construction but has only been exercised against host-aligned devices.
 - **Multi-format export in one pass** — a 16:9 for the blog and a 9:16 for
   social from a single render, which is the one thing the marketing pass asked
   for that isn't built.

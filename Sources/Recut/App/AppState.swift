@@ -12,7 +12,9 @@ final class AppState: ObservableObject {
 
     @Published var project: Project?
     @Published var edit = EditModel() { didSet { editChanged(previous: oldValue) } }
-    @Published var selection: UUID?
+    @Published var selection: UUID? {
+        didSet { if selection != nil { selectedMask = nil } }
+    }
     @Published var errorMessage: String?
     @Published var busyMessage: String?
     @Published var statusMessage: String?
@@ -23,8 +25,22 @@ final class AppState: ObservableObject {
     @Published var exportSettings = ExportSettings()
     @Published var selectedClip: UUID?
     @Published var isCropping = false { didSet { previewModeChanged() } }
-    @Published var selectedMask: UUID?
-    @Published var selectedText: UUID?
+    @Published var selectedMask: UUID? {
+        didSet {
+            // One overlay at a time — the mask overlay unzooms the preview, so
+            // leaving it up while a zoom is selected would show the zoom's
+            // anchor against a frame the zoom isn't applied to.
+            if selectedMask != nil {
+                selection = nil
+                selectedText = nil
+                isCropping = false
+            }
+            previewModeChanged()
+        }
+    }
+    @Published var selectedText: UUID? {
+        didSet { if selectedText != nil { selectedMask = nil } }
+    }
     /// True while the purple anchor dot for a manual zoom is on the preview.
     @Published var placingAnchor = false { didSet { previewModeChanged() } }
     @Published var previewQuality: PreviewQuality = .performance {
@@ -158,6 +174,20 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] paused in self?.areaHighlight.setPaused(paused) }
             .store(in: &cancellables)
+
+        // Microphones and cameras come and go while the app is open; the record
+        // card has to follow rather than show a snapshot taken at launch.
+        for name in [AVCaptureDevice.wasConnectedNotification,
+                     AVCaptureDevice.wasDisconnectedNotification] {
+            NotificationCenter.default.publisher(for: name)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    refreshCaptureDevices()
+                    updateMicrophoneMonitor()
+                }
+                .store(in: &cancellables)
+        }
 
         // The still covers the player while paused and gets out of the way as
         // soon as playback starts.
@@ -347,7 +377,10 @@ final class AppState: ObservableObject {
     /// The crop tool and the manual-zoom anchor both need to see the whole
     /// frame, unzoomed, so the overlay lines up with the pixels.
     private func previewModeChanged() {
-        let full = isCropping || placingAnchor
+        // A selected mask is placed by dragging it on the preview, and its rect
+        // is stored against the full source frame — so the preview has to show
+        // that frame, exactly as the crop tool needs.
+        let full = isCropping || placingAnchor || selectedMask != nil
         renderState.update { $0.previewFullFrame = full }
         player.pause()
         refreshPreview()
@@ -423,8 +456,34 @@ final class AppState: ObservableObject {
 
     // MARK: - Recording
 
+    /// Re-reads the microphone and camera lists.
+    ///
+    /// Kept apart from `refreshDisplays` for two reasons: that one bails out
+    /// early without screen-recording permission, and it only runs on demand —
+    /// so a microphone plugged in after launch never appeared in the picker.
+    func refreshCaptureDevices() {
+        microphones = MicrophoneRecorder.availableDevices()
+        cameras = WebcamRecorder.availableDevices()
+
+        // A device that has gone away shouldn't leave a dangling selection that
+        // silently records nothing.
+        if let id = selectedMicrophoneID, !microphones.contains(where: { $0.uniqueID == id }) {
+            selectedMicrophoneID = nil
+            if !isRecording {
+                statusMessage = "The microphone you had selected was disconnected."
+            }
+        }
+        if let id = selectedCameraID, !cameras.contains(where: { $0.uniqueID == id }) {
+            selectedCameraID = nil
+        }
+    }
+
     func refreshDisplays() async {
         captureError = nil
+        // Before the permission gate: microphones and cameras have nothing to
+        // do with screen recording, and bailing out early used to leave the
+        // pickers empty on a machine that hadn't granted it yet.
+        refreshCaptureDevices()
 
         guard ScreenRecorder.hasScreenRecordingPermission else {
             displays = []
@@ -436,8 +495,6 @@ final class AppState: ObservableObject {
             let found = try await ScreenRecorder.shareableDisplays()
             displays = found
             windows = (try? await ScreenRecorder.shareableWindows()) ?? []
-            microphones = MicrophoneRecorder.availableDevices()
-            cameras = WebcamRecorder.availableDevices()
             permissionDenied = false
             if selectedDisplayID == nil || !found.contains(where: { $0.displayID == selectedDisplayID }) {
                 selectedDisplayID = found.first?.displayID
@@ -576,6 +633,7 @@ final class AppState: ObservableObject {
     }
 
     func startRecording() async {
+        let hadMicrophoneSelected = selectedMicrophoneID != nil
         // The recorder wants the device to itself; the meter carries on from
         // the recorder's own buffers.
         stopMicrophoneMonitor()
@@ -587,11 +645,29 @@ final class AppState: ObservableObject {
             return
         }
 
+        // A microphone was chosen and is no longer there. Recording a silent
+        // demo and finding out in the edit is the worst outcome available, so
+        // stop here instead.
+        refreshCaptureDevices()
+        if selectedMicrophoneID == nil, hadMicrophoneSelected {
+            errorMessage = "The microphone you picked isn't connected any more. "
+                + "Choose another one — or \"No microphone\" — and start again."
+            return
+        }
+
         var mic = selectedMicrophone
         if mic != nil, !MicrophoneRecorder.permissionGranted {
             if await !MicrophoneRecorder.requestPermission() {
                 mic = nil
                 errorMessage = "Microphone access was declined, so the recording will be silent."
+            }
+        }
+        if let device = mic {
+            do {
+                try MicrophoneRecorder.validate(device: device)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
             }
         }
 
@@ -1057,6 +1133,15 @@ final class AppState: ObservableObject {
         edit.masks.append(mask)
         edit.masks.sort { $0.start < $1.start }
         selectedMask = mask.id
+    }
+
+    /// Whether the selected mask is actually on screen at the playhead, so the
+    /// overlay can say when it isn't.
+    var selectedMaskIsActiveNow: Bool {
+        guard let index = selectedMaskIndex else { return false }
+        let mask = edit.masks[index]
+        let source = Timeline(clips: edit.clips).sourceTime(at: player.currentTime)
+        return source >= mask.start && source <= mask.end
     }
 
     func deleteSelectedMask() {

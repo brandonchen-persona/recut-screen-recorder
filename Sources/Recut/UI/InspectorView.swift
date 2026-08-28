@@ -556,36 +556,67 @@ struct InspectorView: View {
                 range: 0.1...1,
                 format: { String(format: "%.0f%%", $0 * 100) }
             )
-            LabeledSlider(
-                title: "Width",
-                value: binding.rect.width,
-                range: 0.05...1,
-                format: { String(format: "%.0f%%", $0 * 100) }
-            )
-            LabeledSlider(
-                title: "Height",
-                value: binding.rect.height,
-                range: 0.05...1,
-                format: { String(format: "%.0f%%", $0 * 100) }
-            )
-            LabeledSlider(
-                title: "X",
-                value: binding.rect.x,
-                range: 0...1,
-                format: { String(format: "%.0f%%", $0 * 100) }
-            )
-            LabeledSlider(
-                title: "Y",
-                value: binding.rect.y,
-                range: 0...1,
-                format: { String(format: "%.0f%%", $0 * 100) }
-            )
+            // Placement is a dragging job, not a four-slider job: what matters
+            // is whether the rectangle covers the thing, which you can only see
+            // on the picture. The numbers stay available for anyone who wants
+            // an exact figure.
+            Label("Drag the rectangle on the preview to move it, "
+                  + "or its corners to resize.", systemImage: "hand.draw")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Button("Delete", systemImage: "trash", role: .destructive) {
-                state.deleteSelectedMask()
+            if !state.selectedMaskIsActiveNow {
+                Label("The playhead is outside this mask, so it isn't on screen.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+
+            DisclosureGroup("Exact size and position") {
+                VStack(alignment: .leading, spacing: 8) {
+                    LabeledSlider(
+                        title: "Width",
+                        value: binding.rect.width,
+                        range: 0.02...1,
+                        format: { String(format: "%.0f%%", $0 * 100) }
+                    )
+                    LabeledSlider(
+                        title: "Height",
+                        value: binding.rect.height,
+                        range: 0.02...1,
+                        format: { String(format: "%.0f%%", $0 * 100) }
+                    )
+                    LabeledSlider(
+                        title: "X",
+                        value: binding.rect.x,
+                        range: 0...1,
+                        format: { String(format: "%.0f%%", $0 * 100) }
+                    )
+                    LabeledSlider(
+                        title: "Y",
+                        value: binding.rect.y,
+                        range: 0...1,
+                        format: { String(format: "%.0f%%", $0 * 100) }
+                    )
+                }
+                .padding(.top, 6)
+            }
+            .font(.system(size: 11))
+
+            HStack(spacing: 8) {
+                Button("Done") { state.selectedMask = nil }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Put the preview back to the finished picture")
+
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    state.deleteSelectedMask()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         } else {
             Text("Click the mask lane on the timeline to cover something up, or to draw "
                  + "attention to it.")

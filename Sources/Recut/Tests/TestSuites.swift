@@ -23,6 +23,7 @@ enum TestSuites {
         textOverlays(t)
         audio(t)
         masks(t)
+        rectDrag(t)
         projectDecoding(t)
         return t.finish()
     }
@@ -116,6 +117,93 @@ enum TestSuites {
                 )
                 t.close(span.start, 0, "start")
                 t.close(span.end, 3, "three seconds")
+            }
+        }
+    }
+
+    // MARK: - Dragging a rectangle
+
+    private static func rectDrag(_ t: TestRunner) {
+        t.suite("RectDrag.moved") {
+            t.test("a plain move shifts without resizing") {
+                let r = RectDrag.moved(NRect(0.2, 0.2, 0.3, 0.2), dx: 0.1, dy: -0.05)
+                t.close(r.x, 0.3, "x"); t.close(r.y, 0.15, "y")
+                t.close(r.width, 0.3, "width kept"); t.close(r.height, 0.2, "height kept")
+            }
+
+            // Dragged into a corner it should stop, not squash — the size is
+            // what the user set and a move must not change it.
+            t.test("it stops at the edges and keeps its size") {
+                let low = RectDrag.moved(NRect(0.2, 0.2, 0.3, 0.2), dx: -9, dy: -9)
+                t.close(low.x, 0, "pinned left"); t.close(low.y, 0, "pinned top")
+                t.close(low.width, 0.3, "width kept"); t.close(low.height, 0.2, "height kept")
+
+                let high = RectDrag.moved(NRect(0.2, 0.2, 0.3, 0.2), dx: 9, dy: 9)
+                t.close(high.x, 0.7, "pinned right"); t.close(high.y, 0.8, "pinned bottom")
+                t.close(high.width, 0.3, "width kept"); t.close(high.height, 0.2, "height kept")
+            }
+
+            t.test("a full-frame rectangle has nowhere to go") {
+                let r = RectDrag.moved(NRect(0, 0, 1, 1), dx: 0.4, dy: 0.4)
+                t.close(r.x, 0, "x"); t.close(r.y, 0, "y")
+                t.close(r.width, 1, "width"); t.close(r.height, 1, "height")
+            }
+        }
+
+        t.suite("RectDrag.resized") {
+            t.test("a corner moves its own two edges only") {
+                let r = RectDrag.resized(NRect(0.2, 0.2, 0.4, 0.4),
+                                         corner: .topLeft, dx: 0.1, dy: 0.1)
+                t.close(r.x, 0.3, "left moved"); t.close(r.y, 0.3, "top moved")
+                t.close(r.width, 0.3, "right stayed"); t.close(r.height, 0.3, "bottom stayed")
+
+                let br = RectDrag.resized(NRect(0.2, 0.2, 0.4, 0.4),
+                                          corner: .bottomRight, dx: 0.1, dy: 0.1)
+                t.close(br.x, 0.2, "left stayed"); t.close(br.y, 0.2, "top stayed")
+                t.close(br.width, 0.5, "right moved"); t.close(br.height, 0.5, "bottom moved")
+            }
+
+            // The one that turns a blur into a hole: drag a corner past its
+            // opposite and a naive implementation gives a negative size, which
+            // renders as nothing at all.
+            t.test("dragging a corner past its opposite never inverts the rect") {
+                for corner in RectDrag.Corner.allCases {
+                    let r = RectDrag.resized(NRect(0.3, 0.3, 0.3, 0.3),
+                                             corner: corner, dx: -5, dy: -5)
+                    t.expect(r.width > 0, "\(corner) width stayed positive: \(r.width)")
+                    t.expect(r.height > 0, "\(corner) height stayed positive: \(r.height)")
+                    let s = RectDrag.resized(NRect(0.3, 0.3, 0.3, 0.3),
+                                             corner: corner, dx: 5, dy: 5)
+                    t.expect(s.width > 0, "\(corner) width positive the other way")
+                    t.expect(s.height > 0, "\(corner) height positive the other way")
+                }
+            }
+
+            t.test("it never shrinks below the minimum side") {
+                let r = RectDrag.resized(NRect(0.3, 0.3, 0.3, 0.3),
+                                         corner: .bottomRight, dx: -5, dy: -5,
+                                         minSide: 0.05)
+                t.close(r.width, 0.05, "width floor"); t.close(r.height, 0.05, "height floor")
+            }
+
+            t.test("it stays inside the frame however far it is dragged") {
+                for corner in RectDrag.Corner.allCases {
+                    for (dx, dy) in [(9.0, 9.0), (-9.0, -9.0), (9.0, -9.0), (-9.0, 9.0)] {
+                        let r = RectDrag.resized(NRect(0.4, 0.4, 0.2, 0.2),
+                                                 corner: corner, dx: dx, dy: dy)
+                        t.expect(r.x >= -0.0001 && r.y >= -0.0001,
+                                 "\(corner) origin inside: \(r.x), \(r.y)")
+                        t.expect(r.x + r.width <= 1.0001 && r.y + r.height <= 1.0001,
+                                 "\(corner) far edge inside: \(r.x + r.width), \(r.y + r.height)")
+                    }
+                }
+            }
+
+            t.test("a nonsense minimum is clamped rather than trusted") {
+                let r = RectDrag.resized(NRect(0.3, 0.3, 0.3, 0.3),
+                                         corner: .topLeft, dx: 5, dy: 5, minSide: 9)
+                t.expect(r.width > 0 && r.height > 0, "still a usable rectangle")
+                t.expect(r.x + r.width <= 1.0001, "still inside the frame")
             }
         }
     }

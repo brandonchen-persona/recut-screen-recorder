@@ -23,6 +23,8 @@ enum CLI {
             bench(Array(args.dropFirst()))
         case "--waveform":
             waveform(Array(args.dropFirst()))
+        case "--mics":
+            microphones(Array(args.dropFirst()))
         case "--windows":
             listWindows()
         default:
@@ -34,6 +36,7 @@ enum CLI {
               Recut --frames <project.recut> <outDir> <t1,t2,…> [width]
               Recut --typing <project.recut> [--apply [speed]]
               Recut --waveform <project.recut>          summarise the audio envelope
+              Recut --mics [index]                      list microphones, or test one
               Recut --test                              run the engine test suite
             """)
             exit(args.first == "--help" ? 0 : 1)
@@ -380,6 +383,210 @@ enum CLI {
             semaphore.signal()
         }
         semaphore.wait()
+    }
+
+    /// Lists the microphones the app can see, and with an index records a couple
+    /// of seconds from one to show what it actually delivers.
+    ///
+    /// The format line is the point: an external interface running at 44.1 kHz
+    /// or a mono headset used to reach the writer in its own shape and get
+    /// rejected. What comes back now should read 48000 Hz / 2 ch whatever the
+    /// hardware is.
+    private static func microphones(_ args: [String]) {
+        let devices = MicrophoneRecorder.availableDevices()
+        guard !devices.isEmpty else {
+            print("No microphones found.")
+            exit(1)
+        }
+        let granted = MicrophoneRecorder.permissionGranted
+        print("Microphone permission: \(granted ? "granted" : "NOT granted")")
+        for (i, device) in devices.enumerated() {
+            print("  [\(i)] \(device.localizedName)")
+            print("      native: \(MicrophoneRecorder.describeFormat(device))")
+            print("      id: \(device.uniqueID)")
+        }
+
+        guard let index = args.first.flatMap(Int.init), devices.indices.contains(index) else {
+            print("\nPass an index to record two seconds from one, e.g. --mics 0")
+            return
+        }
+        var allowed = granted
+        if !allowed {
+            print("\nAsking for microphone access — approve the prompt…")
+            let wait = DispatchSemaphore(value: 0)
+            AVCaptureDevice.requestAccess(for: .audio) { ok in allowed = ok; wait.signal() }
+            while wait.wait(timeout: .now() + 0.05) == .timedOut {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+        }
+        guard allowed else {
+            print("Microphone access denied.")
+            exit(1)
+        }
+
+        let device = devices[index]
+        // `--mics N raw` skips the format conversion, which is how you see the
+        // failure this diagnostic was written for.
+        let raw = args.contains("raw")
+        print("\nRecording 2s from \(device.localizedName)"
+              + (raw ? " (raw: device format, device clock)…" : "…"))
+
+        // The same encoder settings the recorder writes the microphone track
+        // with, so a pass here means a real take would keep its audio.
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("recut-mic-check.m4a")
+        try? FileManager.default.removeItem(at: outURL)
+        let writer = try? AVAssetWriter(outputURL: outURL, fileType: .m4a)
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 2,
+            AVSampleRateKey: 48_000,
+            AVEncoderBitRateKey: 192_000,
+        ])
+        writerInput.expectsMediaDataInRealTime = true
+        if let writer, writer.canAdd(writerInput) { writer.add(writerInput) }
+        writer?.startWriting()
+        var sessionStarted = false
+        var appended = 0
+        var rejected = 0
+
+        let recorder = MicrophoneRecorder()
+        let lock = NSLock()
+        var described: String?
+        var ptsOffset: Double?
+        var frames = 0
+        var sumSquares = 0.0
+        var peak = 0.0
+
+        recorder.onSample = { buffer in
+            guard let description = CMSampleBufferGetFormatDescription(buffer),
+                  let asbd = description.audioStreamBasicDescription else { return }
+            let pts = CMSampleBufferGetPresentationTimeStamp(buffer).seconds
+            let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+            lock.lock()
+            if ptsOffset == nil, pts.isFinite { ptsOffset = pts - hostNow }
+            if described == nil {
+                described = String(
+                    format: "%.0f Hz, %u ch, %u-bit %@",
+                    asbd.mSampleRate, asbd.mChannelsPerFrame, asbd.mBitsPerChannel,
+                    (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 ? "float" : "int"
+                )
+            }
+            lock.unlock()
+
+            guard let block = CMSampleBufferGetDataBuffer(buffer) else { return }
+            var length = 0
+            var pointer: UnsafeMutablePointer<Int8>?
+            guard CMBlockBufferGetDataPointer(
+                block, atOffset: 0, lengthAtOffsetOut: nil,
+                totalLengthOut: &length, dataPointerOut: &pointer
+            ) == noErr, let pointer else { return }
+
+            let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+            lock.lock()
+            if isFloat {
+                pointer.withMemoryRebound(to: Float.self, capacity: length / 4) { samples in
+                    for i in 0..<(length / 4) {
+                        let v = Double(samples[i])
+                        sumSquares += v * v
+                        peak = max(peak, abs(v))
+                        frames += 1
+                    }
+                }
+            } else {
+                pointer.withMemoryRebound(to: Int16.self, capacity: length / 2) { samples in
+                    for i in 0..<(length / 2) {
+                        let v = Double(samples[i]) / 32768
+                        sumSquares += v * v
+                        peak = max(peak, abs(v))
+                        frames += 1
+                    }
+                }
+            }
+            lock.unlock()
+
+            guard let writer, writer.status == .writing else { return }
+            lock.lock()
+            if !sessionStarted {
+                writer.startSession(
+                    atSourceTime: CMSampleBufferGetPresentationTimeStamp(buffer)
+                )
+                sessionStarted = true
+            }
+            if writerInput.isReadyForMoreMediaData {
+                if writerInput.append(buffer) { appended += 1 } else { rejected += 1 }
+            }
+            lock.unlock()
+        }
+
+        do {
+            try MicrophoneRecorder.validate(device: device)
+            try recorder.start(device: device, passthrough: raw)
+        } catch {
+            print("  failed: \(error.localizedDescription)")
+            exit(1)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(2.2))
+        recorder.stop()
+
+        lock.lock()
+        let offset = ptsOffset
+        let format = described ?? "no buffers delivered"
+        let rms = frames > 0 ? (sumSquares / Double(frames)).squareRoot() : 0
+        let sampleCount = frames
+        let peakValue = peak
+        lock.unlock()
+
+        print("  delivered: \(format)")
+        print("  clock:     " + (recorder.isOnHostClock
+            ? "session already on the host clock"
+            : raw ? "device clock, NOT converted"
+                  : "device clock, converted to the host clock"))
+        print("  samples:   \(sampleCount)")
+        if let offset {
+            let verdict = abs(offset) < 1
+                ? "in step with the host clock"
+                : "OFF BY \(String(format: "%.1f", offset))s — would miss the writer session"
+            print(String(format: "  timestamp: %+.3fs vs host now — %@", offset, verdict))
+        }
+        print(String(format: "  level:     rms %.4f  peak %.4f", rms, peakValue))
+        if sampleCount == 0 {
+            print("  !! nothing arrived — the device is not producing audio")
+            exit(1)
+        }
+        if peakValue < 0.0001 {
+            print("  !! digital silence — check the input gain or mute switch")
+        }
+
+        // Now the part that actually failed for external microphones.
+        writerInput.markAsFinished()
+        let finished = DispatchSemaphore(value: 0)
+        writer?.finishWriting { finished.signal() }
+        _ = finished.wait(timeout: .now() + 5)
+
+        lock.lock()
+        let ok = appended, bad = rejected
+        lock.unlock()
+        print("  writer:    \(ok) buffer(s) accepted, \(bad) rejected")
+        if let writer {
+            switch writer.status {
+            case .completed:
+                let asset = AVURLAsset(url: outURL)
+                let seconds = CMTimeGetSeconds(asset.duration)
+                print(String(format: "  wrote:     %.2fs of AAC at %@",
+                             seconds, outURL.lastPathComponent))
+                if seconds < 0.5 {
+                    print("  !! the track is far shorter than the two seconds captured")
+                }
+            case .failed:
+                print("  !! writer FAILED: "
+                      + (writer.error?.localizedDescription ?? "unknown"))
+                print("     this is the failure that made external microphones "
+                      + "record nothing")
+            default:
+                print("  !! writer ended in state \(writer.status.rawValue)")
+            }
+        }
     }
 
     private static func listWindows() {
