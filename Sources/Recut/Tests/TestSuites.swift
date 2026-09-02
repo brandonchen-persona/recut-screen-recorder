@@ -24,6 +24,7 @@ enum TestSuites {
         audio(t)
         masks(t)
         rectDrag(t)
+        cursorRebase(t)
         projectDecoding(t)
         return t.finish()
     }
@@ -117,6 +118,64 @@ enum TestSuites {
                 )
                 t.close(span.start, 0, "start")
                 t.close(span.end, 3, "three seconds")
+            }
+        }
+    }
+
+    // MARK: - Cursor track rebasing
+
+    private static func cursorRebase(_ t: TestRunner) {
+        t.suite("CursorTracker.rebase") {
+            func click(_ time: Double) -> InputEvent {
+                InputEvent(t: time, kind: .click, x: 0.5, y: 0.5)
+            }
+
+            // Tracking now starts before the stream does, so the first frame
+            // arrives after t=0 on the tracker's own clock.
+            t.test("events shift by the gap between tracking and the first frame") {
+                let out = CursorTracker.rebase([click(2), click(5)],
+                                               startTime: 100, timeOrigin: 101)
+                t.equal(out.count, 2, "both kept")
+                t.close(out[0].t, 1, "first click"); t.close(out[1].t, 4, "second click")
+            }
+
+            // A click a fraction before the first frame is a click on what that
+            // frame shows — worth keeping, pulled forward to zero.
+            t.test("a click just before the first frame is pulled to zero") {
+                let out = CursorTracker.rebase([click(0.8)], startTime: 100, timeOrigin: 101)
+                t.equal(out.count, 1, "kept")
+                t.close(out[0].t, 0, "clamped to the start")
+            }
+
+            t.test("anything more than half a second early is dropped") {
+                let out = CursorTracker.rebase([click(0.2), click(0.6), click(3)],
+                                               startTime: 100, timeOrigin: 101)
+                t.equal(out.count, 2, "the -0.8s one is gone")
+                t.close(out[0].t, 0, "the -0.4s one survives at zero")
+                t.close(out[1].t, 2, "and the late one keeps its offset")
+            }
+
+            t.test("tracking that starts after the first frame shifts events later") {
+                let out = CursorTracker.rebase([click(1)], startTime: 101, timeOrigin: 100)
+                t.equal(out.count, 1, "kept")
+                t.close(out[0].t, 2, "pushed back by the gap")
+            }
+
+            t.test("no events in, none out") {
+                t.equal(CursorTracker.rebase([], startTime: 0, timeOrigin: 0).count, 0, "empty")
+            }
+
+            t.test("order and kind survive the shift") {
+                let events = [
+                    InputEvent(t: 1, kind: .move, x: 0.1, y: 0.1),
+                    InputEvent(t: 2, kind: .scroll, x: 0.2, y: 0.2),
+                    InputEvent(t: 3, kind: .rightClick, x: 0.3, y: 0.3),
+                ]
+                let out = CursorTracker.rebase(events, startTime: 10, timeOrigin: 10)
+                t.equal(out.count, 3, "all kept")
+                t.equal(out[0].kind, .move, "move"); t.equal(out[1].kind, .scroll, "scroll")
+                t.equal(out[2].kind, .rightClick, "right click")
+                t.close(out[2].x, 0.3, "position untouched")
             }
         }
     }

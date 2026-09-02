@@ -706,6 +706,17 @@ final class AppState: ObservableObject {
                 on: target.display.flatMap { ScreenRecorder.nsScreen(for: $0) }
             )
 
+            // The controls go up *before* the filter is built, and that
+            // ordering is load-bearing. SCContentFilter can only exclude
+            // applications that appear in SCShareableContent, and an app with
+            // no windows doesn't appear at all — which is exactly what Recut
+            // was at this point, having hidden its own window and not yet made
+            // the controls. The exclusion list came back empty and the timer
+            // and Finish button were filmed along with the screen.
+            presentHUD()
+            // Let the window server register the panel before enumerating.
+            try await Task.sleep(nanoseconds: 200_000_000)
+
             try await recorder.start(
                 target: target,
                 captureAudio: captureAudio,
@@ -715,9 +726,10 @@ final class AppState: ObservableObject {
                 autoZoom: createZoomsAutomatically,
                 captureKeys: captureKeystrokes
             )
-            presentHUD()
             if camera != nil { webcamPreview.show(session: recorder.webcam.session) }
         } catch {
+            hud?.close()
+            hud = nil
             areaHighlight.close()
             restoreWindow()
             errorMessage = error.localizedDescription
