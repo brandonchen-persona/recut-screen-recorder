@@ -59,6 +59,21 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, SCStream
         try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     }
 
+    /// Content used to build the capture filter, including off-screen windows.
+    ///
+    /// `SCContentFilter(display:excludingApplications:)` can only exclude
+    /// applications it is handed, and they have to come out of
+    /// `SCShareableContent`. By the time the filter is built Recut has hidden
+    /// its own window, the countdown has closed and the recording controls
+    /// don't exist yet — so with `onScreenWindowsOnly: true` this application
+    /// isn't in the list at all, the exclusion list comes back empty, and the
+    /// controls end up in the recording. Asking for off-screen windows too puts
+    /// the app back in the list. (Measured: 41 applications and Recut present
+    /// with the flag off; Recut absent with it on.)
+    static func contentForFiltering() async throws -> SCShareableContent {
+        try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    }
+
     static func shareableDisplays() async throws -> [SCDisplay] {
         try await shareableContent().displays
     }
@@ -210,9 +225,18 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, SCStream
         }
 
         // Keep our own windows (including the recording HUD) out of the capture.
-        let content = try await Self.shareableContent()
+        let content = try await Self.contentForFiltering()
         let ownBundleID = Bundle.main.bundleIdentifier ?? "com.recut.app"
         let ownApps = content.applications.filter { $0.bundleIdentifier == ownBundleID }
+        if ownApps.isEmpty {
+            // Nothing to exclude means the controls will be filmed. Better to
+            // know than to find out in the export.
+            FileHandle.standardError.write(Data(
+                "Recut: warning — could not find \(ownBundleID) in the shareable "
+                .utf8))
+            FileHandle.standardError.write(Data(
+                "content, so the recording controls may appear in the capture.\n".utf8))
+        }
         let filter = target.contentFilter(excluding: ownApps)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -231,6 +255,16 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, SCStream
         self.pausedTotal = .zero
         self.pauseStartedAt = nil
 
+        // Pointer tracking starts *before* capture does. Everything after this
+        // line — starting the stream, opening the microphone, bringing up the
+        // camera preview — takes time, and a click in that window used to be
+        // lost outright. Events that land before the first video frame get
+        // rebased to zero by `finish(timeOrigin:)`.
+        let pointerFrame = target.pointerFrame
+        await MainActor.run {
+            self.tracker.start(displayFrame: pointerFrame, captureKeys: captureKeys)
+        }
+
         try await stream.startCapture()
 
         if let device = microphoneDevice {
@@ -247,9 +281,7 @@ final class ScreenRecorder: NSObject, ObservableObject, SCStreamOutput, SCStream
             webcam.startPreview()
         }
 
-        let pointerFrame = target.pointerFrame
         await MainActor.run {
-            self.tracker.start(displayFrame: pointerFrame, captureKeys: captureKeys)
             self.hasMicrophone = microphoneDevice != nil
             self.isRecording = true
             self.isPaused = false

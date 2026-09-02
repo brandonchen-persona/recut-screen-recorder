@@ -291,6 +291,71 @@ investigation actually established:
 Validation is retried three times: the meter's own session has usually just
 released the device, and USB hardware doesn't always let go on the same breath.
 
+### Click capture
+
+Auto-zoom is only as good as the timestamps on the pointer track, and two
+things about it are easy to get wrong.
+
+**Global monitors don't work here.** `NSEvent.addGlobalMonitorForEvents` would
+hand over the exact moment of each click, but mouse monitors need Input
+Monitoring permission, which Recut never asks for. The monitor installs without
+complaint and then never fires — verified with `--clicks`, which caught zero
+clicks through a monitor and every one of them by polling. That's why the
+sampler polls, and it must stay that way unless the app starts requesting the
+permission. The scroll and key monitors are kept because there is no polling
+alternative for those, and they are best-effort.
+
+**The sampler must not live on the main run loop.** It used to, and both
+symptoms of that were reported from real recordings: clicks that never appeared
+at all, and clicks dated up to a second late. A press and release that both land
+between two ticks is invisible, and main-thread work — writer setup, the
+controls appearing, a camera preview starting — stretches the gap between ticks
+far beyond one frame. The timestamp came from the tick that noticed the click,
+so a stall dated the click by however long it lasted; since auto-zoom eases in
+*before* a click, a late click makes a late zoom. It now runs on its own queue
+at 120 Hz reading `CGEventSource.buttonState` and `CGEvent(source:)?.location`,
+both of which are safe off the main thread — `NSEvent.mouseLocation` and AppKit
+are not. Core Graphics measures y from the top of the primary display and
+`displayFrame` is in AppKit's bottom-left coordinates, so `primaryMaxY` is
+captured on the main thread at `start` and the conversion done in the sampler.
+
+Measured with `--clicks` against `clickseq`, five clicks posted 0.600s apart came
+back 0.550 / 0.599 / 0.601 / 0.600 apart — within a tick.
+
+`events` is now touched from two threads (the sampler's queue and the monitors'
+main thread), so everything goes through `lock`.
+
+Tracking also starts *before* `stream.startCapture()`, because starting the
+stream, opening the microphone and bringing up the camera preview all take time
+and a click in that window used to be lost. `finish(timeOrigin:)` rebases
+anything early to zero and drops what is more than half a second early.
+
+### Keeping Recut out of its own recording
+
+`SCContentFilter(display:excludingApplications:)` can only exclude applications
+handed to it, and those have to come out of `SCShareableContent`. An app that
+owns **no windows does not appear there at all** — which is precisely what Recut
+is at the moment it builds the filter, having hidden its own window, closed the
+countdown, and not yet made the recording controls. The exclusion list came back
+empty, nothing was excluded, and the timer and Finish button were filmed along
+with the screen.
+
+Two things guard it now, and the ordering is the important one:
+
+- The controls are presented **before** the filter is built, so the application
+  reliably owns an on-screen window when `SCShareableContent` is enumerated.
+  Moving `presentHUD()` back after `recorder.start(...)` reintroduces the bug.
+- The filter's own fetch uses `onScreenWindowsOnly: false`
+  (`ScreenRecorder.contentForFiltering`), which is a second chance rather than a
+  guarantee — with no window at all the app is missing from that list too. The
+  window picker keeps `onScreenWindowsOnly: true`; widening it there brings back
+  the junk entries that filter is there to remove.
+- If the list still comes back without us, the recorder writes a warning to
+  stderr rather than filming the controls silently.
+
+`--exclusion` reports what the filter would see. Run with the app closed it
+prints "NOT FOUND", which is the failing state reproduced.
+
 ## Where to take it next
 
 - **Widen the test net.** The pure engine is covered; `FrameRenderer` and

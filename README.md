@@ -55,7 +55,9 @@ drag out. Choose system audio, a microphone, a webcam, a countdown, and whether
 to draw the cursor. Recording the iPhone Mirroring window gives you an iPhone
 capture — add a device bezel in the editor. The main window hides itself and a floating controller appears with
 elapsed time, Finish, Pause, Restart and Delete; neither shows up in the
-capture, because the content filter excludes the whole application. Recordings
+capture, because the content filter excludes the whole application — and the
+controls are deliberately put on screen *before* that filter is built, since
+ScreenCaptureKit cannot exclude an application that owns no windows. Recordings
 land in `~/Movies/Recut` as `.recut` packages.
 
 **Choose area…** covers every display, so you can drag a region on whichever
@@ -191,6 +193,8 @@ build/Recut.app/Contents/MacOS/Recut --typing ~/Movies/Recut/Something.recut --a
 build/Recut.app/Contents/MacOS/Recut --waveform ~/Movies/Recut/Something.recut
 build/Recut.app/Contents/MacOS/Recut --mics            # list inputs
 build/Recut.app/Contents/MacOS/Recut --mics 0          # record 2s and check one
+build/Recut.app/Contents/MacOS/Recut --clicks 5        # watch the pointer tracker
+build/Recut.app/Contents/MacOS/Recut --exclusion       # is Recut excluded from capture?
 ```
 
 `--render` is a batch export; the format comes from the file extension, GIF

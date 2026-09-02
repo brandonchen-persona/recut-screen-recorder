@@ -25,6 +25,10 @@ enum CLI {
             waveform(Array(args.dropFirst()))
         case "--mics":
             microphones(Array(args.dropFirst()))
+        case "--clicks":
+            clickCheck(Array(args.dropFirst()))
+        case "--exclusion":
+            exclusionCheck()
         case "--windows":
             listWindows()
         default:
@@ -37,6 +41,8 @@ enum CLI {
               Recut --typing <project.recut> [--apply [speed]]
               Recut --waveform <project.recut>          summarise the audio envelope
               Recut --mics [index]                      list microphones, or test one
+              Recut --exclusion                         can the capture filter see Recut?
+              Recut --clicks [seconds]                  watch the pointer tracker live
               Recut --test                              run the engine test suite
             """)
             exit(args.first == "--help" ? 0 : 1)
@@ -587,6 +593,85 @@ enum CLI {
                 print("  !! writer ended in state \(writer.status.rawValue)")
             }
         }
+    }
+
+    /// Runs the pointer tracker for a few seconds and prints what it caught.
+    ///
+    /// Needs no screen-recording permission — mouse monitors don't — so it
+    /// isolates click capture from everything else in a take. Timestamps are
+    /// relative to when tracking started, which is what auto-zoom plans
+    /// against.
+    private static func clickCheck(_ args: [String]) {
+        let seconds = args.first.flatMap(Double.init) ?? 5
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        // Global monitors need a fully started application, not just a shared
+        // instance, or they install and never fire.
+        app.finishLaunching()
+
+        let tracker = CursorTracker()
+        let frame = NSScreen.main?.frame ?? CGRect(x: 0, y: 0, width: 1, height: 1)
+        tracker.start(displayFrame: frame)
+        print(String(format: "tracking for %.1fs — click anywhere…", seconds))
+
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        // timeOrigin == startTime, so the printed times are tracker time.
+        let events = tracker.finish(timeOrigin: CACurrentMediaTime() - seconds)
+
+        let clicks = events.filter { $0.kind == .click || $0.kind == .rightClick }
+        let scrolls = events.filter { $0.kind == .scroll }
+        print("moves: \(events.filter { $0.kind == .move }.count)  "
+              + "clicks: \(clicks.count)  scrolls: \(scrolls.count)")
+        for c in clicks {
+            print(String(format: "  %@ at %.3fs  (%.3f, %.3f)",
+                         c.kind == .rightClick ? "right" : "left ", c.t, c.x, c.y))
+        }
+    }
+
+    /// Whether ScreenCaptureKit can see this application at all.
+    ///
+    /// `SCContentFilter(display:excludingApplications:)` can only exclude
+    /// applications that appear in `SCShareableContent.applications`. Run from
+    /// the command line this process has no windows — the same state the app is
+    /// in when it builds the filter, having just hidden its own window — so if
+    /// the answer here is "not listed", the recording controls end up in the
+    /// recording.
+    private static func exclusionCheck() {
+        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.recut.app"
+        print("own bundle id: \(ownBundleID)")
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            // What the recorder actually uses.
+            do {
+                let content = try await ScreenRecorder.contentForFiltering()
+                let mine = content.applications.filter { $0.bundleIdentifier == ownBundleID }
+                print("filter-building path: "
+                      + (mine.isEmpty
+                         ? "NOT FOUND — controls would be recorded"
+                         : "found, \(mine.count) app entry/entries excluded"))
+            } catch {
+                print("filter-building path failed: \(error.localizedDescription)")
+            }
+            print("")
+            for onScreenOnly in [true, false] {
+                do {
+                    let content = try await SCShareableContent.excludingDesktopWindows(
+                        false, onScreenWindowsOnly: onScreenOnly
+                    )
+                    let mine = content.applications.filter { $0.bundleIdentifier == ownBundleID }
+                    print("onScreenWindowsOnly: \(onScreenOnly)")
+                    print("  applications visible: \(content.applications.count)")
+                    print("  this app listed:      \(mine.isEmpty ? "NO — nothing would be excluded" : "yes")")
+                } catch {
+                    print("onScreenWindowsOnly: \(onScreenOnly) — failed: \(error.localizedDescription)")
+                }
+            }
+            done.signal()
+        }
+        done.wait()
     }
 
     private static func listWindows() {
