@@ -707,6 +707,53 @@ struct ExportSettings: Codable {
     static let widthChoices = [854, 1280, 1920, 2560, 3840]
 }
 
+// MARK: - Fixed-size area capture
+
+/// A capture resolution to frame an area recording to, rather than dragging one
+/// out by eye.
+///
+/// The sizes are what the file comes out as, not what the box measures on
+/// screen: a 2× display draws a 1080p box at 960×540pt. That's what makes a
+/// preset mean the same delivered video on any monitor.
+enum AreaSizePreset: String, Codable, CaseIterable, Identifiable {
+    case custom
+    case youtube1080, youtube4K, youtubeShorts
+    case linkedInLandscape, linkedInSquare, linkedInPortrait
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .custom: return "Custom"
+        case .youtube1080: return "YouTube — 1920 × 1080"
+        case .youtube4K: return "YouTube 4K — 3840 × 2160"
+        case .youtubeShorts: return "YouTube Shorts — 1080 × 1920"
+        case .linkedInLandscape: return "LinkedIn landscape — 1920 × 1080"
+        case .linkedInSquare: return "LinkedIn square — 1080 × 1080"
+        case .linkedInPortrait: return "LinkedIn portrait — 1080 × 1350"
+        }
+    }
+
+    /// Nil for `.custom`, which takes whatever is typed into the fields.
+    var size: CGSize? {
+        switch self {
+        case .custom: return nil
+        case .youtube1080, .linkedInLandscape: return CGSize(width: 1920, height: 1080)
+        case .youtube4K: return CGSize(width: 3840, height: 2160)
+        case .youtubeShorts: return CGSize(width: 1080, height: 1920)
+        case .linkedInSquare: return CGSize(width: 1080, height: 1080)
+        case .linkedInPortrait: return CGSize(width: 1080, height: 1350)
+        }
+    }
+
+    /// The preset matching a size, so typing 1920 × 1080 by hand selects
+    /// YouTube rather than leaving the menu stuck on Custom.
+    static func matching(width: Int, height: Int) -> AreaSizePreset {
+        let size = CGSize(width: width, height: height)
+        return allCases.first { $0.size == size } ?? .custom
+    }
+}
+
 // MARK: - App-wide preferences
 
 enum PreviewQuality: String, Codable, CaseIterable, Identifiable {
