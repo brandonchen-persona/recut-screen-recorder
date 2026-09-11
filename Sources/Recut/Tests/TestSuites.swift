@@ -1086,6 +1086,116 @@ enum TestSuites {
                 t.close(source.height, screenHeight, "and is the full height")
             }
         }
+
+        t.suite("AreaGeometry.boxSize") {
+            let roomy = CGSize(width: 3440, height: 1440)
+
+            t.test("a 1x display draws the box at the pixel size") {
+                let box = AreaGeometry.boxSize(
+                    forPixels: CGSize(width: 1920, height: 1080), scale: 1, screen: roomy
+                )
+                t.close(box.width, 1920, "width")
+                t.close(box.height, 1080, "height")
+            }
+
+            t.test("a 2x display draws it at half, for the same recording") {
+                let box = AreaGeometry.boxSize(
+                    forPixels: CGSize(width: 1920, height: 1080), scale: 2, screen: roomy
+                )
+                t.close(box.width, 960, "half the width")
+                t.close(box.height, 540, "half the height")
+            }
+
+            t.test("a box too big for the screen keeps its aspect ratio") {
+                // 4K on a 1x laptop-sized screen cannot fit.
+                let screen = CGSize(width: 1440, height: 900)
+                let box = AreaGeometry.boxSize(
+                    forPixels: CGSize(width: 3840, height: 2160), scale: 1, screen: screen
+                )
+                t.expect(box.width <= screen.width, "fits horizontally")
+                t.expect(box.height <= screen.height, "fits vertically")
+                t.close(box.width / box.height, 3840.0 / 2160.0, "16:9 survives", tolerance: 0.01)
+            }
+
+            t.test("sizes stay even, because the encoders reject odd ones") {
+                let box = AreaGeometry.boxSize(
+                    forPixels: CGSize(width: 1081, height: 1351), scale: 1, screen: roomy
+                )
+                t.expect(Int(box.width) % 2 == 0, "even width")
+                t.expect(Int(box.height) % 2 == 0, "even height")
+            }
+
+            t.test("a nonsense scale does not produce a nonsense box") {
+                let box = AreaGeometry.boxSize(
+                    forPixels: CGSize(width: 1920, height: 1080), scale: 0, screen: roomy
+                )
+                t.expect(box.width >= 2 && box.height >= 2, "still usable")
+            }
+        }
+
+        t.suite("AreaGeometry.clampedRect") {
+            let screen = CGSize(width: 1000, height: 800)
+            let box = CGSize(width: 200, height: 100)
+
+            t.test("a box in open space centres on the pointer") {
+                let rect = AreaGeometry.clampedRect(
+                    size: box, centeredOn: CGPoint(x: 500, y: 400), in: screen
+                )
+                t.close(rect.midX, 500, "centred horizontally")
+                t.close(rect.midY, 400, "centred vertically")
+            }
+
+            t.test("it is held inside the left and bottom edges") {
+                let rect = AreaGeometry.clampedRect(
+                    size: box, centeredOn: CGPoint(x: 0, y: 0), in: screen
+                )
+                t.close(rect.minX, 0, "flush to the left")
+                t.close(rect.minY, 0, "flush to the bottom")
+            }
+
+            t.test("and inside the right and top edges") {
+                let rect = AreaGeometry.clampedRect(
+                    size: box, centeredOn: CGPoint(x: 9999, y: 9999), in: screen
+                )
+                t.close(rect.maxX, screen.width, "flush to the right")
+                t.close(rect.maxY, screen.height, "flush to the top")
+            }
+
+            t.test("a box larger than the screen still lands at the origin") {
+                let rect = AreaGeometry.clampedRect(
+                    size: CGSize(width: 2000, height: 2000),
+                    centeredOn: CGPoint(x: 500, y: 400), in: screen
+                )
+                t.close(rect.minX, 0, "no negative origin")
+                t.close(rect.minY, 0, "for either axis")
+            }
+        }
+
+        t.suite("AreaSizePreset") {
+            t.test("every preset but custom carries a size") {
+                for preset in AreaSizePreset.allCases where preset != .custom {
+                    t.expect(preset.size != nil, "\(preset.rawValue) has a size")
+                }
+                t.expect(AreaSizePreset.custom.size == nil, "custom does not")
+            }
+
+            t.test("typing a preset's numbers selects it") {
+                let match = AreaSizePreset.matching(width: 1080, height: 1920)
+                t.expect(match == .youtubeShorts, "1080 × 1920 is Shorts, got \(match.rawValue)")
+            }
+
+            t.test("an unrecognised size falls back to custom") {
+                let match = AreaSizePreset.matching(width: 1234, height: 567)
+                t.expect(match == .custom, "got \(match.rawValue)")
+            }
+
+            t.test("Shorts is portrait and YouTube is landscape") {
+                let shorts = AreaSizePreset.youtubeShorts.size ?? .zero
+                let wide = AreaSizePreset.youtube1080.size ?? .zero
+                t.expect(shorts.height > shorts.width, "Shorts stands up")
+                t.expect(wide.width > wide.height, "YouTube lies down")
+            }
+        }
     }
 
     // MARK: - Project decoding

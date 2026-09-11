@@ -109,11 +109,52 @@ struct LibraryView: View {
                 }
 
             case .area:
+                Toggle("Use a fixed size", isOn: $state.areaUsesFixedSize)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 12))
+                    .help("Position a box of an exact capture resolution instead "
+                          + "of dragging one out by eye")
+
+                if state.areaUsesFixedSize {
+                    HStack(spacing: 6) {
+                        Picker("", selection: Binding(
+                            get: { state.areaSizePreset },
+                            set: { state.areaSizePreset = $0 }
+                        )) {
+                            ForEach(AreaSizePreset.allCases) { preset in
+                                Text(preset.label).tag(preset)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 250)
+                        .accessibilityLabel("Size preset")
+
+                        TextField("", value: $state.areaFixedWidth, format: .number)
+                            .frame(width: 62)
+                            .accessibilityLabel("Width in pixels")
+                        Text("×").foregroundStyle(.secondary)
+                        TextField("", value: $state.areaFixedHeight, format: .number)
+                            .frame(width: 62)
+                            .accessibilityLabel("Height in pixels")
+                        Text("px").font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+
+                    Text("The recording comes out at this size. On a Retina display "
+                         + "the box on screen is half these numbers.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+
                 HStack(spacing: 8) {
-                    Button("Choose area…", systemImage: "viewfinder") {
+                    Button(state.areaUsesFixedSize ? "Place box…" : "Choose area…",
+                           systemImage: "viewfinder") {
                         Task { await state.chooseArea() }
                     }
-                    .help("Drag a region on any display")
+                    .help(state.areaUsesFixedSize
+                          ? "Move the box on any display, then click to place it"
+                          : "Drag a region on any display")
                     .buttonStyle(.bordered)
                     .controlSize(.small)
 

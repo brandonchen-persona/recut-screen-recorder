@@ -16,7 +16,13 @@ enum ScreenOverlay {
     ///
     /// Putting a panel on one display only meant an external monitor couldn't
     /// be selected at all, since the Area controls carry no display picker.
-    static func selectArea() async -> (rect: CGRect, screen: NSScreen)? {
+    /// - Parameter fixedPixelSize: when set, the overlay offers a box of exactly
+    ///   this capture resolution to position rather than a free drag. The box is
+    ///   sized per display, so the same request records the same pixels on a 1×
+    ///   monitor and a 2× one.
+    static func selectArea(
+        fixedPixelSize: CGSize? = nil
+    ) async -> (rect: CGRect, screen: NSScreen)? {
         await withCheckedContinuation { continuation in
             var resumed = false
             var panels: [NSPanel] = []
@@ -56,6 +62,15 @@ enum ScreenOverlay {
                 let view = AreaSelectionView(
                     frame: NSRect(origin: .zero, size: screen.frame.size)
                 )
+                if let fixedPixelSize {
+                    view.fixedBox = AreaGeometry.boxSize(
+                        forPixels: fixedPixelSize,
+                        scale: screen.backingScaleFactor,
+                        screen: screen.frame.size
+                    )
+                    view.fixedPixels = fixedPixelSize
+                    view.pointScale = screen.backingScaleFactor
+                }
                 view.onFinish = { rect in
                     guard let rect, rect.width > 8, rect.height > 8 else {
                         finish(nil)
@@ -154,6 +169,53 @@ enum AreaGeometry {
             height: rect.height
         )
     }
+
+    /// The on-screen box, in points, that records at `pixels`.
+    ///
+    /// Capture resolution is the region's point size multiplied by the display's
+    /// backing scale, so a 1080p capture is 960×540pt on a 2× display and
+    /// 1920×1080pt on a 1× one. Sizing the box this way is what makes a preset
+    /// mean the same output file whichever monitor it lands on.
+    ///
+    /// A box that cannot fit is scaled down rather than refused: an oversized
+    /// region would be clipped by the display bounds anyway, and shrinking it
+    /// keeps the aspect ratio the preset was chosen for.
+    static func boxSize(forPixels pixels: CGSize, scale: CGFloat, screen: CGSize) -> CGSize {
+        let scale = max(1, scale)
+        var w = max(2, pixels.width / scale)
+        var h = max(2, pixels.height / scale)
+
+        let shrink = min(1, min(screen.width / w, screen.height / h))
+        if shrink < 1 {
+            w *= shrink
+            h *= shrink
+        }
+        // Even point sizes keep the pixel size even too, which the encoders
+        // require, and stop the box shimmering by a pixel as it moves.
+        return CGSize(
+            width: max(2, (w / 2).rounded() * 2),
+            height: max(2, (h / 2).rounded() * 2)
+        )
+    }
+
+    /// Places a fixed box centred on the pointer, held fully inside the display.
+    ///
+    /// Without the clamp the box would hang off the edge as the pointer nears
+    /// it, and `SCStreamConfiguration.sourceRect` would be asked for pixels the
+    /// display doesn't have.
+    static func clampedRect(size: CGSize, centeredOn point: CGPoint, in screen: CGSize) -> CGRect {
+        let x = (point.x - size.width / 2)
+            .clamped(to: 0...max(0, screen.width - size.width))
+        let y = (point.y - size.height / 2)
+            .clamped(to: 0...max(0, screen.height - size.height))
+        return CGRect(x: x.rounded(), y: y.rounded(), width: size.width, height: size.height)
+    }
+}
+
+private extension Comparable {
+    func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
 }
 
 // MARK: - Selection view
@@ -168,8 +230,18 @@ private final class SelectionPanel: NSPanel {
 private final class AreaSelectionView: NSView {
     var onFinish: ((CGRect?) -> Void)?
 
+    /// Size of the box to position, in points. Nil means the free-drag mode.
+    var fixedBox: CGSize?
+    /// What that box records, for the readout. Nil in free-drag mode.
+    var fixedPixels: CGSize?
+    /// The display's backing scale, so the readout can show both numbers.
+    var pointScale: CGFloat = 1
+
     private var origin: NSPoint?
     private var current: NSRect = .zero
+    /// Set once the pointer has been seen, so the box doesn't flash at the
+    /// origin before the first mouse move.
+    private var hasPlacedBox = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -180,6 +252,61 @@ private final class AreaSelectionView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var acceptsFirstResponder: Bool { true }
+
+    /// Mouse-moved events are off by default; the fixed box follows the pointer
+    /// without any button held, so it needs them.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard fixedBox != nil, let window else { return }
+        window.acceptsMouseMovedEvents = true
+        // Show the box where the pointer already is rather than waiting for the
+        // first move, which otherwise leaves the screen looking inert.
+        let inWindow = window.mouseLocationOutsideOfEventStream
+        if bounds.contains(convert(inWindow, from: nil)) {
+            moveBox(to: convert(inWindow, from: nil))
+        }
+    }
+
+    /// Only the key window gets `mouseMoved` by default, so on a second display
+    /// the box would sit frozen until clicked. An `.activeAlways` tracking area
+    /// delivers moves to every panel, letting the box follow the pointer across
+    /// monitors — and `mouseExited` takes it off the ones being left behind, so
+    /// there is never more than one box on screen.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        guard fixedBox != nil else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self
+        ))
+    }
+
+    /// Key status follows the pointer so Esc and the arrow keys always act on
+    /// the display the box is actually on.
+    override func mouseEntered(with event: NSEvent) {
+        guard fixedBox != nil, let window, !window.isKeyWindow else { return }
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(self)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard fixedBox != nil else { return }
+        current = .zero
+        hasPlacedBox = false
+        needsDisplay = true
+    }
+
+    /// Centres the fixed box on a point, kept fully on screen.
+    private func moveBox(to point: NSPoint) {
+        guard let fixedBox else { return }
+        current = AreaGeometry.clampedRect(
+            size: fixedBox, centeredOn: point, in: bounds.size
+        )
+        hasPlacedBox = true
+        needsDisplay = true
+    }
 
     /// Without this the first click is consumed activating the window and
     /// never reaches `mouseDown`, so the drag never starts — which looked
@@ -199,6 +326,11 @@ private final class AreaSelectionView: NSView {
             return
         }
 
+        // The fixed box keeps its instructions on screen: unlike a drag, which
+        // is over as soon as the button comes up, placing a box is a state you
+        // can sit in, nudging, and the keys are worth repeating.
+        if fixedBox != nil { drawHint() }
+
         // Punch the selection out of the dimming.
         NSColor.clear.setFill()
         current.fill(using: .copy)
@@ -208,7 +340,16 @@ private final class AreaSelectionView: NSView {
         path.lineWidth = 1.5
         path.stroke()
 
-        let label = "\(Int(current.width)) × \(Int(current.height))"
+        let label: String
+        if let fixedPixels {
+            // The points the box covers are rarely the numbers the user typed,
+            // so show what actually gets recorded and keep the on-screen size
+            // as the secondary figure.
+            label = "\(Int(fixedPixels.width)) × \(Int(fixedPixels.height)) px"
+                + "  ·  \(Int(current.width)) × \(Int(current.height)) pt"
+        } else {
+            label = "\(Int(current.width)) × \(Int(current.height))"
+        }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
             .foregroundColor: NSColor.white,
@@ -232,21 +373,39 @@ private final class AreaSelectionView: NSView {
             .foregroundColor: NSColor.white.withAlphaComponent(0.9),
         ]
         let text = NSAttributedString(
-            string: "Drag to choose an area — Esc to cancel", attributes: attrs
+            string: fixedBox == nil
+                ? "Drag to choose an area — Esc to cancel"
+                : "Move the box, click to place — arrows nudge, Esc to cancel",
+            attributes: attrs
         )
         let size = text.size()
         text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY))
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        guard fixedBox != nil else { return }
+        moveBox(to: convert(event.locationInWindow, from: nil))
+    }
+
     override func mouseDown(with event: NSEvent) {
+        guard fixedBox == nil else {
+            // In fixed mode a press starts a drag of the whole box, and a click
+            // without movement confirms it on mouseUp.
+            moveBox(to: convert(event.locationInWindow, from: nil))
+            return
+        }
         origin = convert(event.locationInWindow, from: nil)
         current = .zero
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let origin else { return }
         let point = convert(event.locationInWindow, from: nil)
+        guard fixedBox == nil else {
+            moveBox(to: point)
+            return
+        }
+        guard let origin else { return }
         current = NSRect(
             x: min(origin.x, point.x),
             y: min(origin.y, point.y),
@@ -261,7 +420,33 @@ private final class AreaSelectionView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { onFinish?(nil) } // Esc
+        switch event.keyCode {
+        case 53: // Esc
+            onFinish?(nil)
+        case 36, 76: // Return, Enter
+            guard fixedBox != nil, hasPlacedBox else { return }
+            onFinish?(current)
+        case 123, 124, 125, 126: // ←, →, ↓, ↑
+            nudge(event)
+        default:
+            break
+        }
+    }
+
+    /// Arrow keys move a fixed box a point at a time, Shift by ten — the only
+    /// way to land it exactly when the pointer keeps rounding to whole points.
+    private func nudge(_ event: NSEvent) {
+        guard fixedBox != nil, hasPlacedBox else { return }
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+        var delta = CGPoint.zero
+        switch event.keyCode {
+        case 123: delta.x = -step
+        case 124: delta.x = step
+        case 125: delta.y = -step
+        case 126: delta.y = step
+        default: return
+        }
+        moveBox(to: CGPoint(x: current.midX + delta.x, y: current.midY + delta.y))
     }
 }
 

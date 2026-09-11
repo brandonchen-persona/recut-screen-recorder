@@ -74,6 +74,39 @@ final class AppState: ObservableObject {
     @Published var selectedArea: CGRect?
     /// Which display that area was drawn on, for the record card.
     @Published var areaScreenName: String?
+
+    /// Frame the area to an exact capture resolution instead of dragging one
+    /// out. Persisted, because whoever records for a fixed target records for
+    /// it every time.
+    @Published var areaUsesFixedSize = UserDefaults.standard
+        .object(forKey: "areaUsesFixedSize") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(areaUsesFixedSize, forKey: "areaUsesFixedSize") }
+    }
+    @Published var areaFixedWidth = UserDefaults.standard
+        .object(forKey: "areaFixedWidth") as? Int ?? 1920 {
+        didSet { UserDefaults.standard.set(areaFixedWidth, forKey: "areaFixedWidth") }
+    }
+    @Published var areaFixedHeight = UserDefaults.standard
+        .object(forKey: "areaFixedHeight") as? Int ?? 1080 {
+        didSet { UserDefaults.standard.set(areaFixedHeight, forKey: "areaFixedHeight") }
+    }
+
+    /// The preset the current numbers correspond to, and setting it writes them.
+    var areaSizePreset: AreaSizePreset {
+        get { AreaSizePreset.matching(width: areaFixedWidth, height: areaFixedHeight) }
+        set {
+            guard let size = newValue.size else { return }
+            areaFixedWidth = Int(size.width)
+            areaFixedHeight = Int(size.height)
+        }
+    }
+
+    /// What `chooseArea` asks the overlay for. Nil means the free drag.
+    var areaFixedPixelSize: CGSize? {
+        guard areaUsesFixedSize else { return nil }
+        guard areaFixedWidth >= 2, areaFixedHeight >= 2 else { return nil }
+        return CGSize(width: areaFixedWidth, height: areaFixedHeight)
+    }
     @Published var microphones: [AVCaptureDevice] = []
     @Published var selectedMicrophoneID: String? {
         didSet { updateMicrophoneMonitor() }
@@ -553,7 +586,7 @@ final class AppState: ObservableObject {
             return
         }
         hideMainWindow()
-        let choice = await ScreenOverlay.selectArea()
+        let choice = await ScreenOverlay.selectArea(fixedPixelSize: areaFixedPixelSize)
         restoreWindow()
 
         guard let choice else { return }
